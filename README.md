@@ -13,4 +13,4 @@ This guide assumes you know how to use the command-line and that your machine ha
 - run `php bin/console doctrine:schema:create`
 - checkout the card data from https://github.com/Kamalisk/arkhamdb-json-data
 - run `php bin/console app:import:std path-to-arkhamdb-json-data/` pointing to where you checked out the json data
-- run `php bin/console server:run`
+- run `php bin/console server:run` | 'symfony server:start' instead
