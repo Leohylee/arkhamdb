@@ -11,6 +11,7 @@ use AppBundle\Entity\Pack;
 use Doctrine\ORM\Query;
 use Doctrine\ORM\Tools\Pagination\Paginator;
 use AppBundle\Entity\Faction;
+use AppBundle\Entity\Card;
 use Doctrine\Common\Collections\ArrayCollection;
 
 /**
@@ -26,6 +27,7 @@ class DecklistManager
 	protected $start = 0;
 	protected $limit = 30;
 	protected $maxcount = 0;
+	protected $popularityString = '(1+d.nbVotes)/(1 + POWER(DATE_DIFF(CURRENT_TIMESTAMP(), d.dateCreation), 1) )';
 
 	public function __construct(EntityManager $doctrine, RequestStack $request_stack, Router $router, LoggerInterface $logger)
 	{
@@ -100,6 +102,40 @@ class DecklistManager
 		$qb->addSelect('(1+d.nbVotes)/(1+POWER(DATE_DIFF(CURRENT_TIMESTAMP(), d.dateCreation), 1.2)) AS HIDDEN popularity');
 		$qb->orderBy('popularity', 'DESC');
 		return $this->getPaginator($qb->getQuery(), $withCount);
+	}
+
+	public function findDecklistsByInvestigator(Card $character, $ignoreEmptyDescriptions = FALSE)
+	{
+		$relatedCards = [$character->getCode()];
+
+		if ($character->getDuplicates()) {
+			foreach ($character->getDuplicates() as $duplicate) {
+				$relatedCards[] = $duplicate->getCode();
+			}
+		}
+		if ($character->getDuplicateOf()) {
+			$relatedCards[] = $character->getDuplicateOf()->getCode();
+		}
+		if ($character->getAlternates()) {
+			foreach ($character->getAlternates() as $alternate) {
+				$relatedCards[] = $alternate->getCode();
+			}
+		}
+		if ($character->getAlternateOf()) {
+			$relatedCards[] = $character->getAlternateOf()->getCode();
+		}
+
+		$qb = $this->getQueryBuilder();
+		$qb->addSelect($this->popularityString.' AS HIDDEN popularity');
+		$qb->innerJoin('d.character', 'investigator');
+		$qb->andWhere('investigator.code IN (:investigator)');
+		$qb->setParameter('investigator', $relatedCards);
+		if ($ignoreEmptyDescriptions){
+			$qb->andWhere('LENGTH(d.descriptionHtml) > 199');
+		}
+		$qb->orderBy('popularity', 'DESC');
+
+		return $this->getPaginator($qb->getQuery());
 	}
 
 	public function findDecklistsByAge($ignoreEmptyDescriptions = FALSE, $withCount = true)
@@ -186,7 +222,7 @@ class DecklistManager
 		return $this->getPaginator($qb->getQuery());
 	}
 
-	public function findDecklistsWithComplexSearch()
+	public function findDecklistsWithComplexSearch($user = false)
 	{
 		$request = $this->request_stack->getCurrentRequest();
 
@@ -200,6 +236,12 @@ class DecklistManager
 			$faction = $this->doctrine->getRepository('AppBundle:Faction')->findOneBy(['code' => $faction_code]);
 		}
 
+		$investigator = false;
+		$investigator_code = filter_var($request->query->get('investigator'), FILTER_SANITIZE_STRING);
+		if($investigator_code) {
+			$investigator = $this->doctrine->getRepository('AppBundle:Card')->findOneBy(['code' => $investigator_code]);
+		}
+
 		$author_name = filter_var($request->query->get('author'), FILTER_SANITIZE_STRING);
 
 		$decklist_name = filter_var($request->query->get('name'), FILTER_SANITIZE_STRING);
@@ -208,12 +250,88 @@ class DecklistManager
 
 		$packs = $request->query->get('packs');
 
+		$collection = filter_var($request->query->get('collection'), FILTER_SANITIZE_STRING);
+		if (!$packs && $collection && $user) {
+			// figure out users collection and assign the packs here!
+			$owned_packs = $user->getOwnedPacks();
+			if ($owned_packs) {
+				$packs = explode(',', $owned_packs);
+			}
+		}
+
 		$qb = $this->getQueryBuilder();
 		$joinTables = [];
 
+		if($investigator) {
+			$duplicates = [];
+			if ($investigator->getDuplicates()) {
+				foreach ($investigator->getDuplicates() as $duplicate) {
+					$duplicates[] = $duplicate->getCode();
+				}
+			}
+			if ($investigator->getDuplicateOf()) {
+				$duplicates[] = $investigator->getDuplicateOf()->getCode();
+			}
+			if ($investigator->getAlternates()) {
+				foreach ($investigator->getAlternates() as $duplicate) {
+					$duplicates[] = $duplicate->getCode();
+				}
+			}
+			if ($investigator->getAlternateOf()) {
+				$duplicates[] = $investigator->getAlternateOf()->getCode();
+			}
+			$qb->innerJoin('d.character', "investigator");
+			if ($duplicates && count($duplicates) > 0) {
+				$qb->andWhere("investigator.code IN (:investigator)");
+				$qb->setParameter("investigator", array_merge([$investigator->getCode()], $duplicates));
+			} else {
+				$qb->andWhere("investigator.code = :investigator");
+				$qb->setParameter("investigator", $investigator->getCode());
+			}
+		}
+
+		$tag = filter_var($request->query->get('tag'), FILTER_SANITIZE_STRING);
+		if($tag) {
+			switch($tag) {
+				case "multiplayer":
+					$qb->andWhere("d.tags like '%multiplayer%'");
+					break;
+				case "theme":
+					$qb->andWhere("d.tags like '%theme%'");
+					break;
+				case "beginner":
+					$qb->andWhere("d.tags like '%beginner%'");
+					break;
+				case "solo":
+					$qb->andWhere("d.tags like '%solo%'");
+					break;
+			}
+		}
+
+		$category = filter_var($request->query->get('category'), FILTER_SANITIZE_STRING);
+		if($category) {
+			switch($category) {
+				case "favorites":
+					$qb->leftJoin('d.favorites', 'u');
+					$qb->andWhere('u = :user');
+					$qb->setParameter('user', $user);
+					$qb->orderBy('d.dateCreation', 'DESC');
+					break;
+				case "mine":
+					if ($user) {
+						$qb->andWhere('d.user = :user');
+						$qb->setParameter('user', $user);
+						$qb->orderBy('d.dateCreation', 'DESC');
+					} else {
+						$qb->andWhere('true = false');
+					}
+					break;
+			}
+		}
+
 		if(!empty($faction)) {
 			$qb->join('d.character', 'a');
-			$qb->where('a.faction = :faction');
+			$qb->andWhere('a.faction = :faction');
 			//$qb->andWhere('d.faction = :faction');
 			$qb->setParameter('faction', $faction);
 		}
@@ -284,7 +402,7 @@ class DecklistManager
 				break;
 			case 'popularity':
 			default:
-				$qb->addSelect('(1+d.nbVotes)/(1+POWER(DATE_DIFF(CURRENT_TIMESTAMP(), d.dateCreation), 2)) AS HIDDEN popularity');
+				$qb->addSelect($this->popularityString.' AS HIDDEN popularity');
 				$qb->orderBy('popularity', 'DESC');
 				break;
 		}
